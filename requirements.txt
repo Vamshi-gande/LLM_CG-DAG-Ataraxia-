@@ -1,0 +1,35 @@
+# ── Inference Middleware — Python PoC Dependencies ──────────────────────────
+# Tested on: Ryzen 5 4600H / 8GB RAM / GTX 1650 4GB VRAM
+# Python: 3.10+
+
+# Web server / proxy
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+httpx==0.27.0          # async HTTP client for forwarding to Ollama
+pydantic==2.7.1
+
+# Graph + vector search
+hnswlib==0.8.0         # HNSW approximate nearest neighbour index
+
+# Embeddings (ONNX, no GPU needed, CPU-only for embedding)
+onnxruntime==1.18.0    # CPU inference — all-MiniLM-L6-v2 is fast enough on CPU
+numpy==1.26.4
+tokenizers==0.19.1     # for all-MiniLM tokeniser (HuggingFace format)
+
+# NLP — lightweight extraction, no LLM call
+spacy==3.7.4
+
+# Persistence
+# sqlite3 is stdlib — no install needed
+
+# Async + scheduling
+asyncio-mqtt==0.16.2   # not used yet, placeholder for future pub/sub
+apscheduler==3.10.4    # background engine scheduler
+
+# Utilities
+pyyaml==6.0.1
+python-dotenv==1.0.1
+rich==13.7.1            # pretty logging / console output during dev
+pytest==8.2.0
+pytest-asyncio==0.23.7
+pytest-cov==5.0.0

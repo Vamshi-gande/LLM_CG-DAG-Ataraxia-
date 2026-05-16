@@ -1,0 +1,115 @@
+# ── Graph-DAG Inference Middleware — Configuration ───────────────────────────
+# Profile: GTX 1650 (4GB VRAM) / Ryzen 5 4600H / 8GB RAM
+# Adjust hardware section when deploying on different machines.
+
+# ── Hardware Profile ─────────────────────────────────────────────────────────
+hardware:
+  vram_gb: 4
+  ram_gb: 8
+  gpu: "GTX 1650"
+  cpu: "Ryzen 5 4600H"
+
+# ── LLM Backend ──────────────────────────────────────────────────────────────
+ollama:
+  base_url: "http://localhost:11434"
+  # GTX 1650 4GB VRAM limits:
+  #   llama3.2:3b  Q4_K_M → ~2.0 GB VRAM  ✓ comfortable
+  #   phi3:mini    Q4_K_M → ~2.2 GB VRAM  ✓ comfortable
+  #   mistral:7b   Q4_K_M → ~4.1 GB VRAM  ✗ OOM on 4GB
+  #   llama3.1:8b  Q4_K_M → ~4.9 GB VRAM  ✗ OOM on 4GB
+  default_model: "llama3.2:3b"
+  timeout_seconds: 120
+
+# ── Middleware Proxy ──────────────────────────────────────────────────────────
+proxy:
+  host: "0.0.0.0"
+  port: 8080           # middleware listens here; point your app at :8080
+  log_level: "info"    # debug | info | warning | error
+
+# ── Graph Engine ─────────────────────────────────────────────────────────────
+graph:
+  # Bypass: skip graph processing when graph is too small to be useful
+  bypass_node_threshold: 20
+  bypass_turn_threshold: 10
+
+  # ANN seed search
+  hnsw_top_k: 10
+  hnsw_ef_search: 50    # higher = better recall, slower; 50 is good for dev
+
+  # Spreading activation
+  damping_factor: 0.6
+  max_hops: 3
+  activation_threshold: 0.05
+
+  # DAG extraction
+  max_dag_candidates: 50
+
+  # Semantic merge threshold (0.92 = only near-identical nodes merge)
+  merge_similarity_threshold: 0.92
+
+# ── Embedding ─────────────────────────────────────────────────────────────────
+embedding:
+  model_name: "all-MiniLM-L6-v2"
+  dimension: 384
+  # ONNX model will be downloaded to this path on first run
+  model_path: "data/models/all-MiniLM-L6-v2.onnx"
+  tokenizer_path: "data/models/all-MiniLM-L6-v2-tokenizer"
+  # CPU-only embedding — fast enough (~5ms), keeps VRAM free for LLM
+  device: "cpu"
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+storage:
+  db_path: "data/db/graph.db"
+  # Async write queue flush interval (ms)
+  write_queue_flush_ms: 50
+  # Cold storage threshold (days without access before archiving)
+  cold_storage_days: 7
+
+# ── Context Budget ────────────────────────────────────────────────────────────
+context:
+  # Total token budget for middleware-injected context
+  total_budget_tokens: 1000
+  # Tier 1: global summary (always present)
+  tier1_tokens: 200
+  # Tier 2: query-specific dynamic context
+  tier2_tokens: 800
+
+# ── Compression Scheduler ─────────────────────────────────────────────────────
+compression:
+  # Engine 1 — Priority Decay (runs per query, no schedule needed)
+  decay_factor: 0.999
+  activation_boost: 0.05
+
+  # Engine 2 — Semantic Merge
+  merge_interval_minutes: 5
+  merge_batch_size: 50
+
+  # Engine 3 — Edge Pruner
+  edge_prune_interval_minutes: 10
+  edge_min_weight: 0.05          # edges below this weight are removed
+
+  # Engine 4 — Hierarchical Abstraction
+  abstraction_interval_minutes: 15
+  abstraction_min_cluster_size: 5
+  abstraction_max_avg_priority: 0.4
+
+  # Engine 5 — Temporal Compressor
+  temporal_interval_minutes: 30
+  temporal_age_days: 7
+  temporal_max_access_count: 3
+  temporal_max_priority: 0.3
+
+  # Engine 6 — Global Summary Regenerator
+  global_summary_interval_minutes: 60
+  global_summary_update_threshold: 0.20   # trigger if >20% nodes updated
+  global_summary_top_n: 30
+  global_summary_max_tokens: 200
+
+# ── Testing ────────────────────────────────────────────────────────────────────
+testing:
+  # Use a separate in-memory DB for tests — never touch the real graph
+  use_in_memory_db: true
+  # Seed fixtures for graph tests
+  fixture_path: "tests/fixtures"
+  # Benchmark session lengths to test
+  benchmark_session_lengths: [5, 10, 25, 50, 100]
