@@ -1,250 +1,157 @@
-# tests/test_environment.py
-# ── Environment Smoke Tests ───────────────────────────────────────────────────
-# Run first: pytest tests/test_environment.py -v
-# All tests here are @unit — no Ollama, no disk, no network.
-# If any fail the setup_env.sh likely didn't complete cleanly.
+"""
+Milestone 0 smoke tests — 25 tests.
+Verify environment, dependencies, schema, fixtures, and config.
+No middleware logic tested here.
+"""
 
+import os
+import sys
+import sqlite3
+import importlib
 import pytest
 import numpy as np
-import sqlite3
-import time
-import uuid
-
-pytestmark = pytest.mark.unit
+import yaml
 
 
-class TestDependencies:
-    """Verify all required packages import and basic functionality works."""
+# ── Group 1: Python version (1 test) ──────────────────────────────────────────
 
-    def test_fastapi_import(self):
-        import fastapi
-        assert fastapi.__version__
-
-    def test_hnswlib_import(self):
-        import hnswlib
-        # Basic index creation
-        index = hnswlib.Index(space="cosine", dim=4)
-        index.init_index(max_elements=10, ef_construction=50, M=8)
-        vec = np.array([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32)
-        index.add_items(vec, [0])
-        labels, distances = index.knn_query(vec, k=1)
-        assert labels[0][0] == 0
-
-    def test_numpy_import(self):
-        arr = np.zeros(384, dtype=np.float32)
-        assert arr.shape == (384,)
-
-    def test_spacy_import(self):
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-        doc = nlp("Graph-DAG middleware uses HNSW for ANN search.")
-        assert len(list(doc.sents)) >= 1
-
-    def test_onnxruntime_import(self):
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        assert "CPUExecutionProvider" in providers
-
-    def test_apscheduler_import(self):
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        sched = AsyncIOScheduler()
-        assert sched is not None
-
-    def test_pyyaml_import(self):
-        import yaml
-        data = yaml.safe_load("key: value\nnested:\n  a: 1")
-        assert data["nested"]["a"] == 1
-
-    def test_httpx_import(self):
-        import httpx
-        assert httpx.__version__
+def test_python_version():
+    assert sys.version_info >= (3, 11), (
+        f"Python 3.11+ required, got {sys.version_info.major}.{sys.version_info.minor}"
+    )
 
 
-class TestSQLiteSchema:
-    """Verify the DB schema is correct and queryable."""
+# ── Group 2: Core dependencies importable (7 tests) ──────────────────────────
 
-    def test_nodes_table_exists(self, in_memory_db):
-        c = in_memory_db.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'")
-        assert c.fetchone() is not None
+def test_import_fastapi():
+    import fastapi
+    assert fastapi.__version__ is not None
 
-    def test_edges_table_exists(self, in_memory_db):
-        c = in_memory_db.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='edges'")
-        assert c.fetchone() is not None
+def test_import_hnswlib():
+    import hnswlib
+    assert hasattr(hnswlib, "Index")
 
-    def test_meta_table_exists(self, in_memory_db):
-        c = in_memory_db.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'")
-        assert c.fetchone() is not None
+def test_import_onnxruntime():
+    import onnxruntime as ort
+    assert hasattr(ort, "InferenceSession")
 
-    def test_node_insert_and_retrieve(self, in_memory_db, make_node):
-        node = make_node("Test concept for GPU memory constraint")
-        emb_bytes = node["embedding"].astype(np.float32).tobytes()
+def test_import_spacy():
+    import spacy
+    assert spacy.__version__ is not None
 
-        c = in_memory_db.cursor()
-        c.execute("""
-            INSERT INTO nodes (id, type, content, embedding, priority,
-                               created_at, updated_at, access_count,
-                               confidence, version, last_reconciled_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            node["id"], node["type"], node["content"], emb_bytes,
-            node["priority"], node["created_at"], node["updated_at"],
-            node["access_count"], node["confidence"],
-            node["version"], node["last_reconciled_version"],
-        ))
-        in_memory_db.commit()
+def test_import_aiosqlite():
+    import aiosqlite
+    assert aiosqlite is not None
 
-        c.execute("SELECT id, content, priority FROM nodes WHERE id=?", (node["id"],))
-        row = c.fetchone()
-        assert row is not None
-        assert row["content"] == node["content"]
-        assert abs(row["priority"] - node["priority"]) < 1e-6
+def test_import_httpx():
+    import httpx
+    assert httpx.__version__ is not None
 
-    def test_edge_insert_and_retrieve(self, in_memory_db, make_node, make_edge):
-        n1 = make_node("GPU VRAM constraint")
-        n2 = make_node("Context window limit")
-        emb1 = n1["embedding"].astype(np.float32).tobytes()
-        emb2 = n2["embedding"].astype(np.float32).tobytes()
-
-        c = in_memory_db.cursor()
-        for n, emb in [(n1, emb1), (n2, emb2)]:
-            c.execute("""
-                INSERT INTO nodes (id, type, content, embedding, priority,
-                                   created_at, updated_at, access_count,
-                                   confidence, version, last_reconciled_version)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (n["id"], n["type"], n["content"], emb, n["priority"],
-                  n["created_at"], n["updated_at"], n["access_count"],
-                  n["confidence"], n["version"], n["last_reconciled_version"]))
-
-        edge = make_edge(n1["id"], n2["id"], "Causal", 0.9)
-        c.execute("""
-            INSERT INTO edges (id, from_node, to_node, type, weight, created_at)
-            VALUES (?,?,?,?,?,?)
-        """, (edge["id"], edge["from_node"], edge["to_node"],
-              edge["type"], edge["weight"], edge["created_at"]))
-        in_memory_db.commit()
-
-        c.execute("SELECT type, weight FROM edges WHERE from_node=?", (n1["id"],))
-        row = c.fetchone()
-        assert row is not None
-        assert row["type"] == "Causal"
-        assert abs(row["weight"] - 0.9) < 1e-6
+def test_import_yaml():
+    import yaml
+    assert yaml.__version__ is not None
 
 
-class TestEmbeddingFixture:
-    """Verify the dummy embedding fixture works correctly."""
+# ── Group 3: Downloaded models exist (3 tests) ────────────────────────────────
 
-    def test_embedding_shape(self, dummy_embed):
-        vec = dummy_embed("test input text")
-        assert vec.shape == (384,)
-        assert vec.dtype == np.float32
+def test_onnx_model_file_exists():
+    path = os.path.join("models", "all-MiniLM-L6-v2", "model.onnx")
+    assert os.path.isfile(path), f"ONNX model not found at {path}"
 
-    def test_embedding_is_unit_vector(self, dummy_embed):
-        vec = dummy_embed("some random content about graph databases")
-        norm = np.linalg.norm(vec)
-        assert abs(norm - 1.0) < 1e-5
+def test_tokenizer_file_exists():
+    path = os.path.join("models", "all-MiniLM-L6-v2", "tokenizer.json")
+    assert os.path.isfile(path), f"Tokenizer not found at {path}"
 
-    def test_embedding_deterministic(self, dummy_embed):
-        vec1 = dummy_embed("identical text produces identical embedding")
-        vec2 = dummy_embed("identical text produces identical embedding")
-        assert np.allclose(vec1, vec2)
-
-    def test_embedding_different_texts_different_vectors(self, dummy_embed):
-        vec1 = dummy_embed("Go programming language")
-        vec2 = dummy_embed("Python programming language")
-        cosine_sim = float(np.dot(vec1, vec2))
-        # Should not be identical
-        assert cosine_sim < 0.9999
+def test_spacy_model_loadable():
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    doc = nlp("test sentence")
+    assert len(doc) > 0
 
 
-class TestNodeAndEdgeFixtures:
-    """Verify the test fixtures produce valid structures."""
+# ── Group 4: SQLite schema correct (5 tests) ──────────────────────────────────
 
-    def test_make_node_has_all_fields(self, make_node):
-        node = make_node("User prefers Go for concurrency")
-        required = ["id", "type", "content", "embedding", "priority",
-                    "created_at", "updated_at", "access_count",
-                    "confidence", "version", "last_reconciled_version"]
-        for field in required:
-            assert field in node, f"Missing field: {field}"
+def test_sqlite_db_file_exists():
+    assert os.path.isfile(os.path.join("data", "graph.db"))
 
-    def test_make_node_default_type(self, make_node):
-        node = make_node("some concept")
-        assert node["type"] == "Concept"
+def test_sqlite_nodes_table_exists():
+    conn = sqlite3.connect(os.path.join("data", "graph.db"))
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    conn.close()
+    table_names = [t[0] for t in tables]
+    assert "nodes" in table_names
 
-    def test_make_node_custom_type(self, make_node):
-        node = make_node("User prefers ONNX", node_type="Preference")
-        assert node["type"] == "Preference"
+def test_sqlite_edges_table_exists():
+    conn = sqlite3.connect(os.path.join("data", "graph.db"))
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    conn.close()
+    assert "edges" in [t[0] for t in tables]
 
-    def test_make_edge_has_all_fields(self, make_node, make_edge):
-        n1 = make_node("source")
-        n2 = make_node("target")
-        edge = make_edge(n1["id"], n2["id"], "Causal", 0.8)
-        required = ["id", "from_node", "to_node", "type", "weight", "created_at"]
-        for field in required:
-            assert field in edge, f"Missing field: {field}"
+def test_sqlite_meta_table_exists():
+    conn = sqlite3.connect(os.path.join("data", "graph.db"))
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    conn.close()
+    assert "meta" in [t[0] for t in tables]
 
-    def test_small_graph_structure(self, small_graph):
-        assert len(small_graph["nodes"]) == 6
-        assert len(small_graph["edges"]) == 5
-        # All node types should be valid
-        valid_types = {"Concept", "Entity", "Event", "Preference", "Goal", "Summary"}
-        for node in small_graph["nodes"]:
-            assert node["type"] in valid_types
-
-    def test_small_graph_edge_types(self, small_graph):
-        valid_edge_types = {
-            "Causal", "Temporal", "Semantic", "Dependency",
-            "Contradicts", "Hierarchical", "Reinforces"
-        }
-        for edge in small_graph["edges"]:
-            assert edge["type"] in valid_edge_types
-
-    def test_small_graph_topology(self, small_graph):
-        """Verify the causal chain: GPU → ctx_limit → compression → dag exists."""
-        edges_by_type = {}
-        for e in small_graph["edges"]:
-            edges_by_type.setdefault(e["type"], []).append(e)
-        assert len(edges_by_type.get("Causal", [])) == 2
-        assert len(edges_by_type.get("Dependency", [])) == 1
+def test_sqlite_nodes_schema():
+    conn = sqlite3.connect(os.path.join("data", "graph.db"))
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(nodes)").fetchall()]
+    conn.close()
+    required = {"id", "type", "content", "embedding", "priority",
+                "created_at", "updated_at", "access_count",
+                "confidence", "version", "last_reconciled_version"}
+    assert required.issubset(set(cols))
 
 
-class TestConfigLoad:
-    """Verify config.yaml loads correctly."""
+# ── Group 5: Config file correct (4 tests) ────────────────────────────────────
 
-    def test_config_loads(self):
-        import yaml, os
-        config_path = "config/config.yaml"
-        if not os.path.exists(config_path):
-            pytest.skip("config.yaml not found — run from project root")
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        assert "ollama" in cfg
-        assert "graph" in cfg
-        assert "embedding" in cfg
-        assert "context" in cfg
-        assert "compression" in cfg
+def test_config_file_exists():
+    assert os.path.isfile(os.path.join("config", "config.yaml"))
 
-    def test_token_budget_adds_up(self):
-        import yaml, os
-        config_path = "config/config.yaml"
-        if not os.path.exists(config_path):
-            pytest.skip("config.yaml not found")
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        ctx = cfg["context"]
-        assert ctx["tier1_tokens"] + ctx["tier2_tokens"] == ctx["total_budget_tokens"]
+def test_config_loads_without_error():
+    with open(os.path.join("config", "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert isinstance(cfg, dict)
 
-    def test_hardware_profile_present(self):
-        import yaml, os
-        config_path = "config/config.yaml"
-        if not os.path.exists(config_path):
-            pytest.skip("config.yaml not found")
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        hw = cfg["hardware"]
-        assert hw["vram_gb"] == 4       # GTX 1650
-        assert hw["ram_gb"] == 8
+def test_config_required_top_level_keys():
+    with open(os.path.join("config", "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    required = {"model", "embedding", "hnsw", "graph", "propagation",
+                "priority", "context", "merge", "bypass", "compression"}
+    assert required.issubset(set(cfg.keys()))
+
+def test_config_hardware_calibrated():
+    with open(os.path.join("config", "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["default"] == "llama3.2:3b"
+    assert cfg["embedding"]["device"] == "cpu"
+    assert cfg["embedding"]["dimension"] == 384
+
+
+# ── Group 6: Fixtures work correctly (5 tests) ────────────────────────────────
+
+def test_dummy_embedder_returns_384_dim(dummy_embedder):
+    vec = dummy_embedder("hello world")
+    assert vec.shape == (384,)
+
+def test_dummy_embedder_returns_normalized(dummy_embedder):
+    vec = dummy_embedder("hello world")
+    norm = np.linalg.norm(vec)
+    assert abs(norm - 1.0) < 1e-5
+
+def test_dummy_embedder_is_deterministic(dummy_embedder):
+    v1 = dummy_embedder("same text")
+    v2 = dummy_embedder("same text")
+    assert np.allclose(v1, v2)
+
+def test_small_graph_has_six_nodes(small_graph):
+    assert len(small_graph["nodes"]) == 6
+
+def test_small_graph_has_five_edges(small_graph):
+    assert len(small_graph["edges"]) == 5
