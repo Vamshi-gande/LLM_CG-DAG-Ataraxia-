@@ -10,3 +10,5 @@ requires-python = ">=3.11"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+norecursedirs = ["WpSystem", ".git", "__pycache__", ".pytest_cache", "node_modules", "msys64", "surveillance_backend_v2", "$RECYCLE.BIN", "System Volume Information", "WindowsApps"]
+addopts = "--ignore-glob=**/msys64/** --ignore-glob=**/surveillance_backend_v2/** --ignore-glob=**/$RECYCLE.BIN/** --ignore=\"D:/System Volume Information\" --ignore=\"D:/WindowsApps\" --ignore=\"D:/$RECYCLE.BIN\" --ignore=\"D:/msys64\" --ignore=\"D:/surveillance_backend_v2\""

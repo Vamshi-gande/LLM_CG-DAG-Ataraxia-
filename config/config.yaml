@@ -15,6 +15,8 @@ hnsw:
   ef_construction: 200
   ef_search: 50
   space: cosine
+  max_elements: 100000
+  rebuild_threshold_ratio: 0.10
 
 graph:
   max_nodes_in_memory: 100000

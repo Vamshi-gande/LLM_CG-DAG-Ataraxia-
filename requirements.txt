@@ -10,3 +10,4 @@ aiosqlite==0.20.0
 pytest==8.3.0
 pytest-asyncio==0.23.8
 huggingface-hub==0.24.0
+tokenizers==0.20.4

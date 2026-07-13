@@ -4,12 +4,12 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Optional
+from typing import List
 import numpy as np
 import yaml
 
 
-# ── Enums (duplicated here intentionally — conftest must be self-contained) ──
+# ── Enums ──────────────────────────────────────────────────────────────────
 
 class NodeType(Enum):
     CONCEPT    = "Concept"
@@ -29,7 +29,7 @@ class EdgeType(Enum):
     REINFORCES   = "Reinforces"
 
 
-# ── Dataclasses (duplicated here — conftest must be self-contained) ──
+# ── Dataclasses ─────────────────────────────────────────────────────────────
 
 @dataclass
 class Node:
@@ -55,17 +55,16 @@ class Edge:
     created_at: float = 0.0
 
 
-# ── Fixtures ──
+# ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def config():
-    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
-    with open(config_path) as f:
+    path = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
+    with open(path) as f:
         return yaml.safe_load(f)
 
 @pytest.fixture
 def in_memory_db():
-    """SQLite in-memory DB with full schema. No file I/O."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""
         CREATE TABLE nodes (
@@ -82,9 +81,7 @@ def in_memory_db():
         )
     """)
     conn.execute("""
-        CREATE TABLE meta (
-            key TEXT PRIMARY KEY, value TEXT, updated_at REAL
-        )
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT, updated_at REAL)
     """)
     conn.commit()
     yield conn
@@ -93,8 +90,8 @@ def in_memory_db():
 @pytest.fixture
 def dummy_embedder():
     """
-    Deterministic fake embedder. Returns normalized 384-dim vectors.
-    No ONNX required. Seeded on content hash for reproducibility.
+    Deterministic fake embedder. No ONNX required.
+    Returns normalized 384-dim float32 vectors seeded on content hash.
     """
     def embed(text: str) -> np.ndarray:
         rng = np.random.default_rng(abs(hash(text)) % (2**32))
@@ -104,7 +101,6 @@ def dummy_embedder():
 
 @pytest.fixture
 def make_node(dummy_embedder):
-    """Factory: make_node(content, type) → Node with deterministic embedding."""
     def factory(content: str, node_type: NodeType = NodeType.CONCEPT) -> Node:
         return Node(
             id=str(uuid.uuid4()),
@@ -119,7 +115,6 @@ def make_node(dummy_embedder):
 
 @pytest.fixture
 def make_edge():
-    """Factory: make_edge(from_id, to_id, type, weight) → Edge."""
     def factory(from_id: str, to_id: str,
                 edge_type: EdgeType = EdgeType.SEMANTIC,
                 weight: float = 0.8) -> Edge:
@@ -135,12 +130,14 @@ def make_edge():
 @pytest.fixture
 def small_graph(make_node, make_edge):
     """
-    6-node causal chain used throughout unit tests:
+    6-node causal chain:
+    Go middleware -> targets Ollama -> runs on consumer GPU
+         -> 4GB VRAM -> 4K context limit -> needs graph compression
 
-    Go middleware → targets Ollama → runs on consumer GPU
-         → 4GB VRAM → 4K context limit → needs graph compression
-
-    All connected by DEPENDENCY edges in that order.
+    Returns: {"nodes": List[Node], "edges": List[Edge]}
+    Node IDs are UUIDs — never hardcode "n1", "n2" etc.
+    Access via: nodes = small_graph["nodes"], edges = small_graph["edges"]
+    Chain traversal: chain[i].id, chain[i+1].id
     """
     n1 = make_node("Go middleware layer", NodeType.CONCEPT)
     n2 = make_node("targets Ollama ecosystem", NodeType.ENTITY)
@@ -148,27 +145,20 @@ def small_graph(make_node, make_edge):
     n4 = make_node("4GB VRAM constraint", NodeType.CONCEPT)
     n5 = make_node("4K token context limit", NodeType.CONCEPT)
     n6 = make_node("requires graph memory compression", NodeType.CONCEPT)
-
-    nodes = [n1, n2, n3, n4, n5, n6]
     chain = [n1, n2, n3, n4, n5, n6]
     edges = [
         make_edge(chain[i].id, chain[i+1].id, EdgeType.DEPENDENCY, 0.9)
         for i in range(len(chain) - 1)
     ]
-
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": chain, "edges": edges}
 
 @pytest.fixture
 def mock_ollama_client():
-    """Fake Ollama client. Returns a canned response without network calls."""
     class MockOllamaClient:
         async def chat(self, model: str, messages: list) -> dict:
             return {
                 "model": model,
-                "message": {
-                    "role": "assistant",
-                    "content": "Mock response from Ollama."
-                },
+                "message": {"role": "assistant", "content": "Mock response."},
                 "done": True
             }
     return MockOllamaClient()
