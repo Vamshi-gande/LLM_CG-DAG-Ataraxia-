@@ -33,7 +33,7 @@ class Graph:
         self._adj:   Dict[str, List[Edge]] = {}   # outgoing edges per node
         self._radj:  Dict[str, List[Edge]] = {}   # incoming edges per node
         self._hnsw: Optional["HNSWIndex"] = None
-        # M3 will add: self.active_dag_ids: set = set()
+        self.active_dag_ids: set = set()
 
     # ── HNSW integration ─────────────────────────────────────────────────────
 

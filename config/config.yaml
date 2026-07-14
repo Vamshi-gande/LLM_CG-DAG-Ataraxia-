@@ -18,6 +18,20 @@ hnsw:
   max_elements: 100000
   rebuild_threshold_ratio: 0.10
 
+propagation:
+  seed_k: 10
+  damping_factor: 0.6
+  hop_limit: 3
+  activation_threshold: 0.05
+  edge_type_damping_multipliers:
+    Causal: 1.0
+    Dependency: 1.0
+    Hierarchical: 0.85
+    Temporal: 0.8
+    Reinforces: 0.9
+    Semantic: 0.6
+    Contradicts: 0.2
+
 graph:
   max_nodes_in_memory: 100000
   cold_storage_threshold_days: 7
