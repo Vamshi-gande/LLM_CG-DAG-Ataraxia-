@@ -2,57 +2,12 @@ import pytest
 import sqlite3
 import os
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import List
 import numpy as np
 import yaml
 
-
-# ── Enums ──────────────────────────────────────────────────────────────────
-
-class NodeType(Enum):
-    CONCEPT    = "Concept"
-    ENTITY     = "Entity"
-    EVENT      = "Event"
-    PREFERENCE = "Preference"
-    GOAL       = "Goal"
-    SUMMARY    = "Summary"
-
-class EdgeType(Enum):
-    CAUSAL       = "Causal"
-    TEMPORAL     = "Temporal"
-    SEMANTIC     = "Semantic"
-    DEPENDENCY   = "Dependency"
-    CONTRADICTS  = "Contradicts"
-    HIERARCHICAL = "Hierarchical"
-    REINFORCES   = "Reinforces"
-
-
-# ── Dataclasses ─────────────────────────────────────────────────────────────
-
-@dataclass
-class Node:
-    id: str
-    type: NodeType
-    content: str
-    embedding: np.ndarray
-    priority: float = 0.5
-    created_at: float = 0.0
-    updated_at: float = 0.0
-    access_count: int = 0
-    confidence: float = 1.0
-    version: int = 1
-    last_reconciled_version: int = 0
-
-@dataclass
-class Edge:
-    id: str
-    from_node: str
-    to_node: str
-    type: EdgeType
-    weight: float
-    created_at: float = 0.0
+from src.graph.node import Node, NodeType
+from src.graph.edge import Edge, EdgeType
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
