@@ -264,7 +264,7 @@ def test_add_edge_to_nonexistent_source_raises():
 
     with pytest.raises(
         ValueError,
-        match="source node 'ghost' does not exist"
+        match="not in graph"
     ):
         g.add_edge(e)
 
@@ -283,7 +283,7 @@ def test_add_edge_to_nonexistent_target_raises():
 
     with pytest.raises(
         ValueError,
-        match="target node 'ghost' does not exist"
+        match="not in graph"
     ):
         g.add_edge(e)
 

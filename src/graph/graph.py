@@ -182,8 +182,11 @@ class Graph:
         REVERSAL_KEYWORDS = [
             "switched from", "no longer", "changed to",
             "instead of", "replaced", "moved from", "stopped using",
+            "not anymore", "dropped", "abandoned",
         ]
         COSINE_THRESHOLD = 0.95
+
+        self.add_node(node)
 
         contradictions: List[Edge] = []
         content_lower = node.content.lower()

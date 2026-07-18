@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _REQUIRED_NODE_COLS = {
     "id", "type", "content", "embedding", "priority",
     "created_at", "updated_at", "access_count", "confidence",
-    "version", "last_reconciled_version",
+    "version", "last_reconciled_version", "archived",
 }
 _REQUIRED_EDGE_COLS = {"id", "from_node", "to_node", "type", "weight", "created_at"}
 _REQUIRED_META_COLS = {"key", "value", "updated_at"}
@@ -242,3 +242,12 @@ class SQLiteStorage:
     async def queue_delete_edge(self, edge_id: str) -> None:
         """Queue a hard edge deletion. Used by compression scheduler in M8."""
         self._enqueue("DELETE FROM edges WHERE id = ?", (edge_id,))
+
+    # ── Static blob operations ────────────────────────────────────────────────
+    @staticmethod
+    def embedding_to_blob(arr: np.ndarray) -> bytes:
+        return _ndarray_to_blob(arr)
+    
+    @staticmethod
+    def blob_to_embedding(blob: bytes) -> np.ndarray:
+        return _blob_to_ndarray(blob)
