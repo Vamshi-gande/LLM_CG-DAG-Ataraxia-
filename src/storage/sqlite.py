@@ -5,13 +5,18 @@ Write strategy: async write queue using (sql, params) tuples.
 NEVER use callable lambdas — aiosqlite requires await conn.execute(),
 and lambdas silently drop all writes.
 
-Schema validation on every startup via PRAGMA table_info().
+Schema validation on every startup via PRAGMA table_info(). Missing
+columns on an existing DB file are auto-migrated (ALTER TABLE ADD COLUMN)
+before validation runs, so an older data/graph.db (e.g. one created
+before the `archived` column existed) self-heals instead of refusing
+to start.
 """
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
+import sqlite3
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -30,6 +35,17 @@ _REQUIRED_NODE_COLS = {
 }
 _REQUIRED_EDGE_COLS = {"id", "from_node", "to_node", "type", "weight", "created_at"}
 _REQUIRED_META_COLS = {"key", "value", "updated_at"}
+
+# Column -> (SQL type, default clause) used by _migrate_missing_columns_sync()
+# when ALTER TABLE ADD COLUMN is needed for a column that's in the required
+# set above but absent from an existing table on disk. Only additive,
+# nullable-or-defaulted columns belong here — anything requiring a type
+# change, rename, or NOT NULL without a default needs a real migration.
+_NODE_COL_DEFAULTS = {
+    "archived": ("INTEGER", "NOT NULL DEFAULT 0"),
+}
+_EDGE_COL_DEFAULTS = {}
+_META_COL_DEFAULTS = {}
 
 
 def _ndarray_to_blob(arr: np.ndarray) -> bytes:
@@ -80,23 +96,49 @@ class SQLiteStorage:
         self._init_schema_sync()
 
     def _init_schema_sync(self) -> None:
-        import sqlite3
         con = sqlite3.connect(self._db_path)
         try:
-            for stmt in self.SCHEMA.strip().split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    con.execute(stmt)
+            con.executescript(self.SCHEMA)          # CREATE TABLE IF NOT EXISTS
+            self._migrate_missing_columns_sync(con)  # self-heal existing DB files
             con.commit()
             self._validate_schema_sync(con)
         finally:
             con.close()
 
+    def _migrate_missing_columns_sync(self, con) -> None:
+        """
+        ALTER TABLE ADD COLUMN, but ONLY for columns explicitly listed in
+        the *_COL_DEFAULTS maps (currently just `archived` on `nodes`) —
+        known-safe additive migrations with a vetted type and default.
+
+        Deliberately does NOT attempt to auto-heal any other missing
+        required column. Guessing a generic TEXT/no-default column for
+        something like `priority` or `created_at` would satisfy the
+        column-name check in _validate_schema_sync() while silently
+        corrupting the type contract (REAL NOT NULL DEFAULT 0.5 -> nullable
+        TEXT) that every read/write in this file assumes. Anything missing
+        outside this curated set is real schema corruption and must still
+        surface as a RuntimeError from _validate_schema_sync(), not be
+        papered over here.
+        """
+        checks = [
+            ("nodes", _NODE_COL_DEFAULTS),
+            ("edges", _EDGE_COL_DEFAULTS),
+            ("meta", _META_COL_DEFAULTS),
+        ]
+        for table, defaults in checks:
+            existing = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+            for col, (col_type, default_clause) in defaults.items():
+                if col not in existing:
+                    con.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col} {col_type} {default_clause}"
+                    )
+
     def _validate_schema_sync(self, con) -> None:
         checks = [
             ("nodes", _REQUIRED_NODE_COLS),
             ("edges", _REQUIRED_EDGE_COLS),
-            ("meta",  _REQUIRED_META_COLS),
+            ("meta", _REQUIRED_META_COLS),
         ]
         for table, required in checks:
             cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
@@ -109,7 +151,6 @@ class SQLiteStorage:
     # ── Read operations ───────────────────────────────────────────────────────
 
     def load_all_nodes(self) -> List[Node]:
-        import sqlite3
         con = sqlite3.connect(self._db_path)
         nodes = []
         try:
@@ -139,7 +180,6 @@ class SQLiteStorage:
         return nodes
 
     def load_all_edges(self) -> List[Edge]:
-        import sqlite3
         con = sqlite3.connect(self._db_path)
         edges = []
         try:
@@ -161,7 +201,6 @@ class SQLiteStorage:
         return edges
 
     def load_meta(self, key: str) -> Optional[str]:
-        import sqlite3
         con = sqlite3.connect(self._db_path)
         try:
             row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -202,6 +241,13 @@ class SQLiteStorage:
     # ── Async write operations ────────────────────────────────────────────────
 
     async def queue_save_node(self, node: Node) -> None:
+        # archived is always written as 0 here: queue_save_node() is only
+        # ever called on nodes currently live in memory (M7's eager local
+        # update, M1-era creation). An archived node is removed from
+        # memory (M8 Engine 4) and would never reach this call — so
+        # forcing archived=0 on every INSERT OR REPLACE is the correct
+        # invariant, not an oversight. M8's thaw path uses a distinct
+        # code path, not this method.
         sql = """
             INSERT OR REPLACE INTO nodes
                 (id, type, content, embedding, priority, created_at, updated_at,
@@ -247,7 +293,7 @@ class SQLiteStorage:
     @staticmethod
     def embedding_to_blob(arr: np.ndarray) -> bytes:
         return _ndarray_to_blob(arr)
-    
+
     @staticmethod
     def blob_to_embedding(blob: bytes) -> np.ndarray:
         return _blob_to_ndarray(blob)

@@ -13,6 +13,7 @@ from src.graph.edge import Edge, EdgeType
 from src.hnsw.index import HNSWIndex
 from src.propagation import spreading_activation, seed_activation, spread
 from src.propagation.activation import EDGE_TYPE_DAMPING_MULTIPLIERS
+from src.influence.table import InfluenceEntry, INFLUENCE_MEDIUM
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -112,7 +113,11 @@ def test_seed_activation_calls_reconcile(loaded_graph, dummy_embedder):
     g, idx, nodes = loaded_graph
     target = nodes[0]
     target.last_reconciled_version = 1
-    influence = {target.id: {"source_version": 7}}
+    influence = {
+        target.id: [InfluenceEntry(source_node_id="some_source_id",
+                                    strength=INFLUENCE_MEDIUM,
+                                    source_version=7)]
+    }
     seed_activation(dummy_embedder("middleware"), g, idx, k=5,
                      influence_table=influence)
     assert target.last_reconciled_version == 7
