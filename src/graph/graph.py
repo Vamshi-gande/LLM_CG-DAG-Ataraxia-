@@ -34,6 +34,14 @@ class Graph:
         self._radj:  Dict[str, List[Edge]] = {}   # incoming edges per node
         self._hnsw: Optional["HNSWIndex"] = None
         self.active_dag_ids: set = set()
+        # M8 — Option A cold storage tracking. A node_id in this set has
+        # been archived (removed from _nodes / SQLite archived=1) but its
+        # embedding is still resident in the main HNSW index. On the next
+        # HNSW hit for that node_id, seed_activation() thaws it back into
+        # _nodes and discards it from this set. Never conflate with
+        # active_dag_ids: active_dag_ids = "in use right now, don't touch";
+        # cold_node_ids = "archived, still in HNSW, thaw-on-next-hit".
+        self.cold_node_ids: set = set()
 
     # ── HNSW integration ─────────────────────────────────────────────────────
 

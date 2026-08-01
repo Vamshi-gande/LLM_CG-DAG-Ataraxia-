@@ -1,6 +1,6 @@
 import time
 import math
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING
 import numpy as np
 
 from src.graph.graph import Graph
@@ -8,6 +8,9 @@ from src.graph.node import Node
 from src.graph.edge import EdgeType
 from src.hnsw.index import HNSWIndex
 from src.propagation.reconcile import check_and_reconcile
+
+if TYPE_CHECKING:
+    from src.storage.sqlite import SQLiteStorage
 
 
 # Per-edge-type damping multipliers, applied on top of the base damping
@@ -59,6 +62,7 @@ def seed_activation(
     k: int = 10,
     freshness_lambda: float = 0.1,
     influence_table: Optional[Dict[str, Any]] = None,
+    storage: Optional["SQLiteStorage"] = None,
 ) -> Dict[str, float]:
     """
     ANN search -> initial activation scores for seed nodes.
@@ -73,11 +77,27 @@ def seed_activation(
       they must never enter the activation map, not even at hop 0
       (finding #1).
     - Ghost HNSW entries (node_id present in the index but not in
-      graph._nodes) are silently skipped (finding #9).
+      graph._nodes) are silently skipped (finding #9) — UNLESS the
+      node_id is a cold-storage thaw candidate, see below (M8).
     - influence_table is threaded through and check_and_reconcile() is
       called for every seed candidate before scoring (finding #3). In M3
       this is always None (no-op passthrough). M7 wires in the real table
       with zero changes to this function.
+
+    M8 — cold storage thaw (Option A):
+      A node absent from graph._nodes is not automatically a ghost entry
+      anymore. If node_id is in graph.cold_node_ids, it was archived by
+      Engine 2 (merge loser) or Engine 4 (temporal compression) but its
+      embedding was deliberately left resident in the main HNSW index so
+      it can be found here. When `storage` is supplied, that node is
+      loaded back from SQLite, re-added to the live graph, dropped from
+      cold_node_ids, and its SQLite row is flipped back to archived=0 —
+      it re-enters the normal priority/access-count system exactly as if
+      it had never been archived, and survives a future restart as a
+      normal live node. Callers that don't have a storage handle (e.g.
+      most unit tests) pass storage=None, which preserves the pre-M8
+      behavior: cold hits are skipped like any other ghost entry, no
+      thaw occurs.
     """
     if graph.node_count() == 0:
         return {}
@@ -92,9 +112,34 @@ def seed_activation(
             continue
 
         node = graph.get_node(node_id)
+
         if node is None:
-            # ghost HNSW entry — index and graph have drifted, skip safely
-            continue
+            if node_id in graph.cold_node_ids and storage is not None:
+                thawed = storage.load_node_by_id(node_id)
+                if thawed is None:
+                    # cold_node_ids and SQLite have drifted — treat as ghost
+                    continue
+                graph.add_node(thawed)
+                graph.cold_node_ids.discard(node_id)
+                # Flip archived back to 0 in SQLite so a future restart's
+                # load_all_nodes() picks this node back up as live rather
+                # than leaving it stranded archived with dangling edges.
+                # seed_activation() is a synchronous function and cannot
+                # `await storage.queue_unarchive_node(...)`, so this calls
+                # the underlying sync enqueue directly — queue_* methods
+                # are declared `async def` only for call-site consistency
+                # with the rest of the write API; the actual enqueue
+                # (`_enqueue()` -> `Queue.put_nowait()`) is non-blocking
+                # and safe to call from sync code. If SQLiteStorage's
+                # internals ever change this, update this call site too.
+                storage._enqueue(
+                    "UPDATE nodes SET archived = 0 WHERE id = ?", (node_id,)
+                )
+                node = thawed
+            else:
+                # true ghost entry (index/graph drift, or no storage handle
+                # to thaw with) — skip safely, same as pre-M8 behavior
+                continue
 
         check_and_reconcile(node, graph, influence_table)
 
@@ -185,11 +230,13 @@ def spreading_activation(
     priority_decay: float = 0.999,
     activation_boost: float = 0.05,
     influence_table: Optional[Dict[str, Any]] = None,
+    storage: Optional["SQLiteStorage"] = None,
 ) -> Dict[str, float]:
     """
     Full spreading activation pipeline. Main entry point for M4+.
 
-    1. seed_activation()  - active_dag_ids excluded at seed time
+    1. seed_activation()  - active_dag_ids excluded at seed time; cold
+       storage thaw attempted when storage is supplied (M8)
     2. spread()           - incremental propagation, active_dag_ids excluded throughout
     3. threshold filter
     4. final active_dag_ids safety filter (finding #1, defense in depth):
@@ -205,6 +252,7 @@ def spreading_activation(
         query_embedding, graph, hnsw,
         k=seed_k, freshness_lambda=freshness_lambda,
         influence_table=influence_table,
+        storage=storage,
     )
 
     spread_result = spread(seeds, graph, damping=damping, hop_limit=hop_limit)

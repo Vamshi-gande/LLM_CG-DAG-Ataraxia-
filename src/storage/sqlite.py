@@ -150,6 +150,30 @@ class SQLiteStorage:
 
     # ── Read operations ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _row_to_node(row: tuple) -> Node:
+        """
+        Shared row->Node deserialization. Extracted out of load_all_nodes()
+        so load_node_by_id() (M8, cold-storage thaw) uses the exact same
+        conversion rather than a second hand-written copy that could drift
+        out of sync with it over time.
+        """
+        (nid, ntype, content, emb_blob, priority, created_at,
+         updated_at, access_count, confidence, version, lrv) = row
+        return Node(
+            id=nid,
+            type=NodeType(ntype),
+            content=content,
+            embedding=_blob_to_ndarray(emb_blob),
+            priority=priority,
+            created_at=created_at,
+            updated_at=updated_at,
+            access_count=access_count,
+            confidence=confidence,
+            version=version,
+            last_reconciled_version=lrv,
+        )
+
     def load_all_nodes(self) -> List[Node]:
         con = sqlite3.connect(self._db_path)
         nodes = []
@@ -160,24 +184,37 @@ class SQLiteStorage:
                 "FROM nodes WHERE archived = 0 OR archived IS NULL"
             ).fetchall()
             for row in rows:
-                (nid, ntype, content, emb_blob, priority, created_at,
-                 updated_at, access_count, confidence, version, lrv) = row
-                nodes.append(Node(
-                    id=nid,
-                    type=NodeType(ntype),
-                    content=content,
-                    embedding=_blob_to_ndarray(emb_blob),
-                    priority=priority,
-                    created_at=created_at,
-                    updated_at=updated_at,
-                    access_count=access_count,
-                    confidence=confidence,
-                    version=version,
-                    last_reconciled_version=lrv,
-                ))
+                nodes.append(self._row_to_node(row))
         finally:
             con.close()
         return nodes
+
+    def load_node_by_id(self, node_id: str) -> Optional[Node]:
+        """
+        Single-row read, used by the M8 cold-storage thaw path
+        (seed_activation() in src/propagation/activation.py, Option A).
+
+        Deliberately does NOT filter on `archived` — a thaw target IS
+        archived=1 by definition (that's why it's not in graph._nodes in
+        the first place), unlike load_all_nodes() which excludes archived
+        rows because it's only ever called once, at startup, before any
+        node has had the chance to be archived. Returns None if the id
+        doesn't exist at all (cold_node_ids and SQLite have drifted) —
+        callers must treat that the same as a ghost HNSW entry.
+        """
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT id, type, content, embedding, priority, created_at, "
+                "updated_at, access_count, confidence, version, last_reconciled_version "
+                "FROM nodes WHERE id = ?",
+                (node_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_node(row)
+        finally:
+            con.close()
 
     def load_all_edges(self) -> List[Edge]:
         con = sqlite3.connect(self._db_path)
@@ -243,11 +280,16 @@ class SQLiteStorage:
     async def queue_save_node(self, node: Node) -> None:
         # archived is always written as 0 here: queue_save_node() is only
         # ever called on nodes currently live in memory (M7's eager local
-        # update, M1-era creation). An archived node is removed from
-        # memory (M8 Engine 4) and would never reach this call — so
-        # forcing archived=0 on every INSERT OR REPLACE is the correct
-        # invariant, not an oversight. M8's thaw path uses a distinct
-        # code path, not this method.
+        # update, M1-era creation, and — as of M8 — a thawed cold node
+        # re-entering the live graph in seed_activation()). An archived
+        # node is removed from memory (M8 Engine 4) and would never reach
+        # this call — so forcing archived=0 on every INSERT OR REPLACE is
+        # the correct invariant, not an oversight. Thawing itself does not
+        # call this method (thaw is a pure in-memory graph.add_node(), no
+        # SQLite write — the row is already sitting there with
+        # archived=1 until something explicitly un-archives it); this
+        # comment is about what happens the NEXT time a thawed node gets
+        # saved through the normal write path.
         sql = """
             INSERT OR REPLACE INTO nodes
                 (id, type, content, embedding, priority, created_at, updated_at,
@@ -284,6 +326,26 @@ class SQLiteStorage:
         CRITICAL (M8): All edges must be deleted BEFORE calling this.
         """
         self._enqueue("UPDATE nodes SET archived = 1 WHERE id = ?", (node_id,))
+
+    async def queue_unarchive_node(self, node_id: str) -> None:
+        """
+        M8 — flip archived back to 0 for a thawed node.
+
+        Thawing itself (seed_activation() re-adding a Node to the live
+        graph) does not need this to function correctly this session —
+        the node is already fully live in memory and will be found via
+        graph._nodes on every subsequent query. This exists so that on
+        the NEXT process restart, load_all_nodes() (which filters
+        `WHERE archived = 0 OR archived IS NULL`) picks the thawed node
+        back up as a normal live node instead of leaving it stranded in
+        archived state with no edges (since load_all_edges() loads
+        unconditionally, but add_edge() would still raise ValueError for
+        an edge pointing at a node that never got loaded). Call this from
+        the thaw path in seed_activation() alongside graph.add_node(),
+        as an async storage write (Phase 2 style — after the in-memory
+        mutation, per the M8 asyncio-mutation-safety rule).
+        """
+        self._enqueue("UPDATE nodes SET archived = 0 WHERE id = ?", (node_id,))
 
     async def queue_delete_edge(self, edge_id: str) -> None:
         """Queue a hard edge deletion. Used by compression scheduler in M8."""

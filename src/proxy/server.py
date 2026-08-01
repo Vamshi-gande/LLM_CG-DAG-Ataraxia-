@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+from typing import Optional
 
 import spacy
 import yaml
@@ -18,6 +20,7 @@ from src.context.assembler import ContextAssembler
 from src.proxy.ollama_client import OllamaClient
 from src.proxy.bypass import should_bypass
 from src.updater.updater import process_response
+from src.compression.scheduler import CompScheduler
 
 
 # ── Application state (populated during lifespan startup) ────────────────────
@@ -33,6 +36,7 @@ class AppState:
     turn_count: int = 0
     influence_table: dict
     spacy_nlp: object
+    scheduler: Optional[CompScheduler] = None  # M8
 
 
 state = AppState()
@@ -53,6 +57,13 @@ async def lifespan(app: FastAPI):
         Step 3:  Init Graph
         Step 4:  load_all_nodes() -> graph.add_node() for each   NODES FIRST
         Step 5:  load_all_edges() -> graph.add_edge() for each   EDGES AFTER
+        Step 5b: Rebuild graph.cold_node_ids from archived rows in SQLite
+                 (M8). cold_node_ids is in-memory only; on a fresh process
+                 it starts empty, which would silently break the cold
+                 storage thaw mechanism for anything archived in a
+                 previous run. Read-only query, does not load full node
+                 objects into memory — those stay in SQLite until an HNSW
+                 hit actually thaws one via seed_activation().
         Step 6:  load_meta("global_summary") -> assembler.update_global_summary()
         Step 7:  Init ONNXEmbedder
         Step 7b: Init spaCy model (M7 - Layer 2 extraction) + influence
@@ -67,11 +78,17 @@ async def lifespan(app: FastAPI):
                  Without this guard a second drain task is created and
                  double-writes occur on every flush cycle.
         Step 11: Init OllamaClient
-        Step 12: launch background compression engine tasks (M8 - placeholder)
+        Step 12: state.scheduler = CompScheduler(); state.scheduler.start(...)
+                 (M8 — launches Engines 2-5 as background asyncio Tasks.
+                 Must run AFTER start_write_queue(), since every engine
+                 issues `await storage.queue_*()` calls that assume the
+                 write queue is already draining. Engine 1 is NOT launched
+                 here — it runs inline inside spreading_activation().)
         Step 13: yield - serve requests
 
     SHUTDOWN:
         await storage.stop_write_queue()  - final flush guarantee
+        await state.scheduler.stop()      - cancel + await all engine tasks (M8)
         await ollama.close()
     """
     with open("config/config.yaml") as f:
@@ -106,6 +123,12 @@ async def lifespan(app: FastAPI):
         state.graph.add_node(node)
     for edge in state.storage.load_all_edges():     # EDGES AFTER ALL NODES
         state.graph.add_edge(edge)
+
+    # M8 — rebuild cold_node_ids from archived nodes in SQLite. Must run
+    # after nodes/edges load and before any query can hit seed_activation().
+    with sqlite3.connect("data/graph.db") as _conn:
+        _rows = _conn.execute("SELECT id FROM nodes WHERE archived=1").fetchall()
+        state.graph.cold_node_ids = {row[0] for row in _rows}
 
     global_summary = state.storage.load_meta("global_summary") or ""
 
@@ -143,13 +166,25 @@ async def lifespan(app: FastAPI):
     # Ollama client
     state.ollama = OllamaClient(base_url=ollama_base_url)
 
-    # M8: launch compression engine background tasks here
-    # (placeholder - not implemented until M8)
+    # M8 — launch compression engine background tasks (Engines 2-5).
+    # Must run after start_write_queue() (previous step).
+    state.scheduler = CompScheduler()
+    state.scheduler.start(
+        graph=state.graph,
+        hnsw=state.hnsw,
+        storage=state.storage,
+        embedder=state.embedder,
+        ollama=state.ollama,
+        assembler=state.assembler,
+        config=state.config,
+    )
 
     yield  # serve requests
 
     # Shutdown
     await state.storage.stop_write_queue()
+    if state.scheduler is not None:
+        await state.scheduler.stop()
     await state.ollama.close()
 
 
@@ -196,6 +231,7 @@ async def _run_full_pipeline(query_text: str) -> str:
         hop_limit=cfg["propagation"]["hop_limit"],
         activation_threshold=cfg["propagation"]["activation_threshold"],
         influence_table=state.influence_table,
+        storage=state.storage,  # M8 — enables cold-storage thaw in seed_activation()
     )
 
     if not activated:
